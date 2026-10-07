@@ -1,0 +1,138 @@
+"""Test mirror logic thuần (KHỚP Code.gs + import-csv.js)."""
+import unittest
+from datetime import datetime
+from api.logic import (
+    gen_code, next_seq, next_seq_reserved, bulk_codes, BULK_MAX,
+    storage_days, can_resolve, can_liquidate,
+    canonical_status, canonical_kind, valid_liq_code, can_edit_status,
+    history_bill, map_history_row,
+    check_create_photos, can_delete_user, extract_drive_id, can_edit, CODE_RE, TZ,
+)
+
+
+class TestCodeFormat(unittest.TestCase):
+    def test_gen_code_format(self):
+        dt = datetime(2026, 10, 1, 10, 0, 0, tzinfo=TZ)
+        self.assertEqual(gen_code("Box", dt, 21), "Box.01-10-2026.21")
+        self.assertEqual(gen_code("Item", dt, 1), "Item.01-10-2026.1")
+        self.assertTrue(CODE_RE.match("Box.01-10-2026.21"))
+
+    def test_next_seq_per_day(self):
+        codes = ["Box.01-10-2026.1", "Box.01-10-2026.2", "Box.02-10-2026.1"]
+        dt = datetime(2026, 10, 1, tzinfo=TZ)
+        self.assertEqual(next_seq(codes, "Box", dt), 3)
+        dt2 = datetime(2026, 10, 2, tzinfo=TZ)
+        self.assertEqual(next_seq(codes, "Box", dt2), 2)
+        self.assertEqual(next_seq([], "Item", dt), 1)
+
+
+class TestStatus(unittest.TestCase):
+    def test_canonical_status(self):
+        self.assertEqual(canonical_status(""), "chua_xu_ly")
+        self.assertEqual(canonical_status("tìm thấy bill"), "da_tim_bill")
+        self.assertEqual(canonical_status("THANH LÝ"), "thanh_ly")
+
+    def test_kind_prefix_priority(self):
+        self.assertEqual(canonical_kind("ITEM.01.x", "Box"), "Item")
+        self.assertEqual(canonical_kind("BOX.01.x", "Item"), "Box")
+
+    def test_resolve_gate(self):
+        self.assertEqual(can_resolve("chua_xu_ly"), (True, ""))
+        self.assertEqual(can_resolve("da_tim_bill"), (False, "Đã Resolve"))
+        self.assertEqual(can_resolve("thanh_ly"), (False, "Đã Thanh Lý"))
+
+    def test_liquidate_gate(self):
+        self.assertEqual(can_liquidate("chua_xu_ly"), (True, ""))
+        self.assertEqual(can_liquidate("thanh_ly"), (False, "Đã Thanh Lý"))
+        self.assertEqual(can_liquidate("da_tim_bill"), (False, "Đã Resolve"))
+
+    def test_liq_code_required(self):
+        self.assertTrue(valid_liq_code("SPXVN123"))
+        self.assertFalse(valid_liq_code(""))
+        self.assertFalse(valid_liq_code("hello"))
+
+    def test_edit_status_gate(self):
+        self.assertEqual(can_edit_status("STAFF", "chua_xu_ly", ""), (False, "Cần quyền ADMIN."))
+        self.assertEqual(can_edit_status("ADMIN", "chua_xu_ly", ""), (True, ""))
+        self.assertEqual(can_edit_status("ADMIN", "da_tim_bill", "SPXVN123"), (True, ""))
+        self.assertEqual(can_edit_status("ADMIN", "thanh_ly", "SPXVN123"), (True, ""))
+        self.assertEqual(can_edit_status("ADMIN", "da_tim_bill", ""), (False, "Thiếu mã bill."))
+        self.assertEqual(can_edit_status("ADMIN", "thanh_ly", "  "), (False, "Thiếu mã bill."))
+        self.assertEqual(can_edit_status("ADMIN", "da_cho_di", "SPXVN1"), (False, "Trạng thái không hợp lệ."))
+
+    def test_map_history_row(self):
+        h = ["at", "code", "from_status", "to_status", "by", "note"]
+        r = ["06/10/2026 18:01:00", "Box.1", "chua_xu_ly", "da_tim_bill", "a@x.com", "SPXVN1"]
+        self.assertEqual(map_history_row(h, r, "Box.1")["to"], "da_tim_bill")
+        self.assertEqual(map_history_row(h, r, "Box.2"), None)
+        shuffled = ["by", "note", "code", "at", "to_status", "from_status"]
+        rs = ["a@x.com", "SPXVN1", " Box.1 ", "06/10/2026 18:01:00", "da_tim_bill", "chua_xu_ly"]
+        got = map_history_row(shuffled, rs, "Box.1")
+        self.assertEqual(got["from"], "chua_xu_ly")
+        self.assertEqual(got["by"], "a@x.com")
+        self.assertEqual(map_history_row(["at", "by"], ["x", "y"], "Box.1"), None)
+
+    def test_history_bill(self):
+        self.assertEqual(history_bill("chua_xu_ly", "da_tim_bill", "SPXVN123"), "SPXVN123")
+        self.assertEqual(history_bill("chua_xu_ly", "thanh_ly", "SPXVN9"), "SPXVN9")
+        self.assertEqual(history_bill("", "chua_xu_ly", "Tạo mới"), "")
+        self.assertEqual(history_bill("da_tim_bill", "da_tim_bill", "ADMIN chỉnh sửa Ảnh"), "")
+        self.assertEqual(history_bill("da_tim_bill", "chua_xu_ly", ""), "")
+
+    def test_photo_gate(self):
+        self.assertEqual(check_create_photos("Box", "", "", 0)[0], False)
+        self.assertEqual(check_create_photos("Box", "a", "", 0), (False, "Box cần đủ Ảnh ngoại quan + Ảnh sản phẩm."))
+        self.assertEqual(check_create_photos("Box", "a", "b", 1), (True, ""))
+        self.assertEqual(check_create_photos("Box", "a", "b", 2), (False, "Tối đa 3 ảnh."))
+        self.assertEqual(check_create_photos("Item", "", "", 0), (False, "Item cần Ảnh sản phẩm."))
+        self.assertEqual(check_create_photos("Item", "", "b", 0), (True, ""))
+
+    def test_delete_user_gate(self):
+        rows = [("a@x.com", "ADMIN"), ("b@x.com", "ADMIN")]
+        self.assertEqual(can_delete_user(rows, "b@x.com", "a@x.com"), (True, ""))
+        self.assertEqual(can_delete_user(rows, "a@x.com", "a@x.com"), (False, "Không tự xóa chính mình."))
+        self.assertEqual(can_delete_user([("a@x.com", "ADMIN")], "a@x.com", "z@x.com"), (False, "Không thể xóa ADMIN cuối cùng."))
+        self.assertEqual(can_delete_user(rows, "z@x.com", "a@x.com"), (False, "Email không có trong danh sách."))
+
+    def test_edit_gate(self):
+        self.assertEqual(can_edit("ADMIN"), (True, ""))
+        self.assertEqual(can_edit("STAFF"), (False, "Chỉ ADMIN được sửa."))
+        self.assertEqual(can_edit(""), (False, "Chỉ ADMIN được sửa."))
+
+    def test_extract_drive_id(self):
+        self.assertEqual(extract_drive_id("1AbCdefGhIjKlMnOp"), "1AbCdefGhIjKlMnOp")
+        self.assertEqual(extract_drive_id("https://drive.google.com/file/d/1AbCdefGhIjKlMnOp/view"), "1AbCdefGhIjKlMnOp")
+        self.assertEqual(extract_drive_id("https://drive.google.com/thumbnail?id=1AbCdefGhIjKlMnOp&sz=w400"), "1AbCdefGhIjKlMnOp")
+        self.assertEqual(extract_drive_id(""), "")
+        self.assertEqual(extract_drive_id("https://example.com/a.jpg"), "")
+
+    def test_storage_days(self):
+        now = datetime(2026, 10, 6, 10, 0, 0, tzinfo=TZ)
+        self.assertEqual(storage_days("01/10/2026 10:00:00", now), 5)
+        self.assertEqual(storage_days("06/10/2026 10:00:00", now), 0)
+        self.assertEqual(storage_days("khong-phai-ngay", now), 0)
+
+    def test_bulk_codes_continuous(self):
+        dt = datetime(2026, 10, 6, 10, 0, 0, tzinfo=TZ)
+        got = bulk_codes(["Box.06-10-2026.1", "Box.06-10-2026.2"], [], "Box", dt, 10)
+        self.assertEqual(len(got), 10)
+        self.assertEqual(got[0], "Box.06-10-2026.3")
+        self.assertEqual(got[-1], "Box.06-10-2026.12")
+
+    def test_bulk_codes_skip_reserved(self):
+        dt = datetime(2026, 10, 6, 10, 0, 0, tzinfo=TZ)
+        printed = ["Box.06-10-2026.%d" % i for i in range(3, 13)]
+        got = bulk_codes(["Box.06-10-2026.1", "Box.06-10-2026.2"], printed, "Box", dt, 10)
+        self.assertEqual(got[0], "Box.06-10-2026.13")
+        self.assertEqual(next_seq_reserved(["Item.06-10-2026.1"], printed, "Item", dt), 2)
+
+    def test_bulk_codes_count_clamped(self):
+        dt = datetime(2026, 10, 6, 10, 0, 0, tzinfo=TZ)
+        self.assertEqual(len(bulk_codes([], [], "Item", dt, 99)), BULK_MAX)
+        self.assertEqual(len(bulk_codes([], [], "Item", dt, 0)), BULK_MAX)
+        self.assertEqual(bulk_codes([], [], "Item", dt, 3),
+                         ["Item.06-10-2026.1", "Item.06-10-2026.2", "Item.06-10-2026.3"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,24 @@
+# Credentials — TUYỆT ĐỐI không commit
+.clasp.json
+.clasprc.json
+*.clasprc.json
+.env
+
+# Node
+node_modules/
+dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Plan gate tam (luat 13, khong commit)
+plan.md
+
+# Python
+__pycache__/
+*.pyc
+index.local.html
